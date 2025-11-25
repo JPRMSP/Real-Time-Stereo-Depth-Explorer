@@ -1,147 +1,121 @@
 import streamlit as st
 import numpy as np
 import cv2
-import plotly.graph_objects as go
-from PIL import Image
+import pywt
+from skimage.segmentation import watershed
+from scipy import ndimage
 
-st.set_page_config(page_title="Real-Time Stereo Depth Explorer", layout="wide")
+st.set_page_config(page_title="Synthetic Lung CT & Lobe Segmentation Simulator", layout="wide")
 
-st.title("🔵 Real-Time Stereo Depth Explorer (RT-SDE)")
-st.write("A dataset-free, model-free real-time 3D reconstruction demo using Stereo Vision.")
+# -------------------------- UTILITY FUNCTIONS --------------------------
 
-# ----------- Utility Functions -----------
+def generate_synthetic_lung(size=256):
+    img = np.zeros((size, size), dtype=np.uint8)
 
-def to_gray(img):
-    return cv2.cvtColor(np.array(img), cv2.COLOR_BGR2GRAY)
+    # Left lung
+    cv2.ellipse(img, (size//3, size//2), (60, 90), 0, 0, 360, 180, -1)
 
-def compute_sad(left, right, block, disp_range):
-    h, w = left.shape
-    disp = np.zeros((h, w), np.float32)
+    # Right lung
+    cv2.ellipse(img, (2*size//3, size//2), (70, 100), 0, 0, 360, 180, -1)
 
-    pad = block // 2
-    left_pad = np.pad(left, pad)
-    right_pad = np.pad(right, pad)
+    # Add fissure line (horizontal)
+    fissure_y = size//2 + 15
+    cv2.line(img, (size//4, fissure_y), (3*size//4, fissure_y), 120, 2)
 
-    for y in range(pad, h-pad):
-        for x in range(pad, w-pad):
-            best = 1e9
-            best_d = 0
-            L = left_pad[y-pad:y+pad+1, x-pad:x+pad+1]
-            for d in range(disp_range):
-                xr = x - d
-                if xr < pad:
-                    continue
-                R = right_pad[y-pad:y+pad+1, xr-pad:xr+pad+1]
-                cost = np.sum(np.abs(L - R))
-                if cost < best:
-                    best = cost
-                    best_d = d
-            disp[y, x] = best_d
-    return disp
+    # Gaussian noise
+    noise = np.random.normal(0, 10, (size, size))
+    img = np.clip(img + noise, 0, 255).astype(np.uint8)
+
+    return img
 
 
-def compute_zncc(left, right, block, disp_range):
-    h, w = left.shape
-    disp = np.zeros((h, w), np.float32)
-
-    pad = block // 2
-    left_pad = np.pad(left, pad)
-    right_pad = np.pad(right, pad)
-
-    for y in range(pad, h-pad):
-        for x in range(pad, w-pad):
-            best = -1e9
-            best_d = 0
-            L = left_pad[y-pad:y+pad+1, x-pad:x+pad+1]
-            L_mean = np.mean(L)
-            L_std = np.std(L) + 1e-5
-
-            for d in range(disp_range):
-                xr = x - d
-                if xr < pad: 
-                    continue
-                R = right_pad[y-pad:y+pad+1, xr-pad:xr+pad+1]
-                R_mean = np.mean(R)
-                R_std = np.std(R) + 1e-5
-
-                zncc = np.sum((L - L_mean) * (R - R_mean)) / (block*block*L_std*R_std)
-                if zncc > best:
-                    best = zncc
-                    best_d = d
-            disp[y, x] = best_d
-
-    return disp
-
-
-def disparity_to_3d(disp):
-    h, w = disp.shape
-    Q = np.array([
-        [1, 0, 0, -w/2],
-        [0, -1, 0, h/2],
-        [0, 0, 0, -1],
-        [0, 0, 1, 0]
-    ])
-
-    pts = []
-    colors = []
-
-    for y in range(h):
-        for x in range(w):
-            d = disp[y, x]
-            if d > 0:
-                X = (x - w/2) / d
-                Y = (h/2 - y) / d
-                Z = 1.0 / (d + 1e-5)
-                pts.append((X, Y, Z))
-
-    pts = np.array(pts)
-    return pts
-
-
-# ------------- UI Layout -----------------
-
-col1, col2 = st.columns(2)
-
-with col1:
-    left_img = st.file_uploader("Upload LEFT image", type=["jpg", "png"])
-with col2:
-    right_img = st.file_uploader("Upload RIGHT image", type=["jpg", "png"])
-
-if left_img and right_img:
-    L = Image.open(left_img)
-    R = Image.open(right_img)
-
-    st.subheader("Rectified Stereo Pair")
-    st.image([L, R], caption=["Left", "Right"], width=300)
-
-    grayL = to_gray(L)
-    grayR = to_gray(R)
-
-    algo = st.radio("Select Stereo Algorithm", ["SAD", "ZNCC"])
-    block = st.slider("Block Size", 3, 15, 7, step=2)
-    disp_range = st.slider("Max Disparity", 5, 60, 25)
-
-    st.subheader("Computing Disparity...")
-    if algo == "SAD":
-        disp = compute_sad(grayL, grayR, block, disp_range)
-    else:
-        disp = compute_zncc(grayL, grayR, block, disp_range)
-
-    disp_norm = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX)
-    st.image(disp_norm, caption="Disparity Map", channels="GRAY")
-
-    st.subheader("3D Reconstruction")
-    pts = disparity_to_3d(disp)
-
-    fig = go.Figure(
-        data=[go.Scatter3d(
-            x=pts[:,0], y=pts[:,1], z=pts[:,2],
-            mode='markers',
-            marker=dict(size=2)
-        )]
+def adaptive_threshold(img):
+    return cv2.adaptiveThreshold(
+        img, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 41, 5
     )
-    fig.update_layout(height=600, scene=dict(aspectmode='data'))
-    st.plotly_chart(fig, use_container_width=True)
 
-else:
-    st.info("Upload both left and right images to begin.")
+
+def apply_morphology(binary):
+    kernel = np.ones((5,5), np.uint8)
+    eroded = cv2.erode(binary, kernel, iterations=1)
+    dilated = cv2.dilate(eroded, kernel, iterations=2)
+    return dilated
+
+
+def watershed_segmentation(binary):
+    dist = ndimage.distance_transform_edt(binary)
+    markers = ndimage.label(dist > 0.15 * dist.max())[0]
+    labels = watershed(-dist, markers, mask=binary)
+    return (labels * 50).astype(np.uint8)
+
+
+def detect_nodules(img):
+    # high-intensity spots => possible nodules
+    _, th = cv2.threshold(img, 160, 255, cv2.THRESH_BINARY)
+    count = np.sum(th > 0)
+    risk = "Low"
+    if count > 400: risk = "Medium"
+    if count > 900: risk = "High"
+    return th, risk
+
+
+def wavelet_decompose(img):
+    coeffs2 = pywt.dwt2(img, 'haar')
+    LL, (LH, HL, HH) = coeffs2
+    return LL, LH, HL, HH
+
+# -------------------------- UI --------------------------
+
+st.title("🫁 Synthetic Lung CT Generator & Lobe Segmentation Simulator")
+
+tab1, tab2, tab3, tab4 = st.tabs(["Generate CT", "Segmentation", "Wavelets", "Cancer Analysis"])
+
+# -------------------------- TAB 1 --------------------------
+with tab1:
+    st.header("1. Synthetic CT Slice")
+    img = generate_synthetic_lung()
+    st.image(img, caption="Generated Lung CT Slice", use_column_width=True)
+
+# -------------------------- TAB 2 --------------------------
+with tab2:
+    st.header("2. Lung Segmentation Pipeline")
+
+    th = adaptive_threshold(img)
+    st.subheader("Adaptive Thresholding")
+    st.image(th, use_column_width=True)
+
+    morph = apply_morphology(th)
+    st.subheader("Morphology (Erosion + Dilation)")
+    st.image(morph, use_column_width=True)
+
+    ws = watershed_segmentation(morph)
+    st.subheader("Watershed Segmentation (Lobe Simulation)")
+    st.image(ws, use_column_width=True)
+
+# -------------------------- TAB 3 --------------------------
+with tab3:
+    st.header("3. Wavelet Transform")
+    LL, LH, HL, HH = wavelet_decompose(img)
+
+    st.subheader("LL (Approximation)")
+    st.image(LL, use_column_width=True)
+
+    st.subheader("LH / HL / HH (Detail Coefficients)")
+    st.image(np.hstack([LH, HL, HH]), use_column_width=True)
+
+# -------------------------- TAB 4 --------------------------
+with tab4:
+    st.header("4. Cancer-like Feature Analysis (No ML Used)")
+
+    nod, risk = detect_nodules(img)
+    st.subheader(f"Nodule Map — Risk Level: {risk}")
+    st.image(nod, use_column_width=True)
+
+    st.markdown("""
+    ### Interpretation  
+    - Bright regions = high-density anomalies  
+    - Rule-based score checks the number of bright pixels  
+    - No machine learning or dataset used  
+    """)
+
+st.success("App Ready — Deploy via Streamlit, Colab, or GitHub!")
